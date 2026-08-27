@@ -19,5 +19,26 @@
     "tp3_touche": false,
     "resultat_pips": -16.1,
     "fermee_le": "2026-08-27T10:24:25.098049+00:00"
+  },
+  {
+    "id": "EURCAD=X_2026-08-26T22:23:18.978346+00:00",
+    "ticker": "EURCAD=X",
+    "ticker_display": "EUR/CAD",
+    "asset_type": "forex",
+    "direction": "ACHAT",
+    "prix_entree": 1.6168,
+    "stop_loss": 1.61557,
+    "take_profit_1": 1.61876,
+    "take_profit_2": 1.61974,
+    "take_profit_3": null,
+    "rr_tp1": 1.6,
+    "pips_risque": 12.3,
+    "ouverte_le": "2026-08-26T22:23:18.978346+00:00",
+    "statut": "FERMEE_SL",
+    "tp1_touche": false,
+    "tp2_touche": false,
+    "tp3_touche": false,
+    "resultat_pips": -12.3,
+    "fermee_le": "2026-08-27T11:54:23.276533+00:00"
   }
 ]
