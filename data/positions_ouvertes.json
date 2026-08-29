@@ -1,6 +1,6 @@
 [
   {
-    "id": "EURJPY=X_2026-08-29T02:19:45.452945+00:00",
+    "id": "EURJPY=X_2026-08-29T22:25:00.500625+00:00",
     "ticker": "EURJPY=X",
     "ticker_display": "EUR/JPY",
     "asset_type": "forex",
@@ -12,7 +12,7 @@
     "take_profit_3": null,
     "rr_tp1": 1.6,
     "pips_risque": 11.3,
-    "ouverte_le": "2026-08-29T02:19:45.452945+00:00",
+    "ouverte_le": "2026-08-29T22:25:00.500625+00:00",
     "statut": "OUVERTE",
     "tp1_touche": false,
     "tp2_touche": false,
@@ -21,7 +21,7 @@
     "fermee_le": null
   },
   {
-    "id": "EURGBP=X_2026-08-29T02:19:47.776055+00:00",
+    "id": "EURGBP=X_2026-08-29T22:25:02.317059+00:00",
     "ticker": "EURGBP=X",
     "ticker_display": "EUR/GBP",
     "asset_type": "forex",
@@ -33,7 +33,7 @@
     "take_profit_3": null,
     "rr_tp1": 1.6,
     "pips_risque": 3.7,
-    "ouverte_le": "2026-08-29T02:19:47.776055+00:00",
+    "ouverte_le": "2026-08-29T22:25:02.317059+00:00",
     "statut": "OUVERTE",
     "tp1_touche": false,
     "tp2_touche": false,
