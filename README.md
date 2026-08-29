@@ -1,88 +1,88 @@
-# MR EMA — Robot d'analyse de marché avec alertes Telegram
+# MAC Bot — Robot d'analyse BTMM avec alertes Telegram
 
 ## ⚠️ À lire avant de déployer
 
-1. **Ce robot n'exécute aucun trade.** Il analyse le marché et envoie des alertes sur Telegram. Toute décision de trading reste la tienne.
-2. **Les données Yahoo Finance sont différées d'environ 15-20 minutes.** Ce n'est pas du vrai temps réel — c'est une limite technique de la source de données gratuite, pas un défaut du code.
-3. **Aucune stratégie technique ne garantit un gain.** EMA/MACD/TDI/ATR forment une architecture cohérente (tendance + momentum + timing + risque), mais ils sont dérivés du même prix historique et ne prédisent rien. Teste en observation avant tout capital réel.
-4. **Régénère ton token Telegram** si tu l'as déjà partagé ailleurs qu'ici (via [@BotFather](https://t.me/BotFather), commande `/revoke`) avant de le mettre dans GitHub Secrets.
+1. **Régénère le token Telegram** avant de le mettre en production — il a été partagé en clair dans la conversation qui a servi à construire ce projet. Sur BotFather : `/mybots` → `macbottrading_bot` → API Token → Revoke current token.
+2. **Change le mot de passe "Canaux"** (`78100302`) — même raison.
+3. **Les données Twelve Data (plan gratuit) ne sont pas du temps réel exact** — délai documenté d'environ 1 à 15 minutes selon l'actif. C'est plus rapide que Yahoo Finance en général, mais ce n'est toujours pas instantané.
+4. **Aucune stratégie technique ne garantit un gain.** Ce robot est un outil d'aide à la décision, pas un système infaillible.
 
-## Étape 1 — Créer le repo GitHub
+## Architecture
 
-1. Va sur [github.com/new](https://github.com/new)
-2. Nom du repo : `mr-ema` (ou ce que tu veux)
-3. **Visibilité : Private** (obligatoire — ce repo contiendra l'historique de tes positions)
-4. Crée le repo, puis upload tous les fichiers de ce projet en conservant la structure des dossiers (en particulier `.github/workflows/trading-bot.yml` doit rester à cet emplacement exact)
+- **Render (web service gratuit)** héberge le code Flask en permanence
+- **cron-job.org (gratuit)** appelle `https://ton-app.onrender.com/cron/<CRON_SECRET>` toutes les 20 minutes → déclenche l'analyse
+- **Telegram webhook** pointe vers `https://ton-app.onrender.com/webhook/<TELEGRAM_BOT_TOKEN>` → reçoit les commandes du bot en direct
 
-## Étape 2 — Configurer les secrets
+Le plan gratuit Render met le service en veille après 15 minutes d'inactivité. Le premier appel après une pause (cron ou message utilisateur) prend 30 à 60 secondes de plus le temps que le service se réveille — normal, pas un bug.
 
-Dans le repo : **Settings → Secrets and variables → Actions → New repository secret**
+## Étape 1 — Déployer sur Render
 
-Ajoute ces deux secrets :
+1. Crée un repo GitHub avec tous les fichiers de ce projet (structure conservée)
+2. Sur [render.com](https://render.com), crée un compte, puis **New → Web Service**
+3. Connecte ton repo GitHub
+4. Render détecte `render.yaml` automatiquement (Blueprint) — sinon configure manuellement :
+   - Build command : `pip install -r requirements.txt`
+   - Start command : `gunicorn main:app --bind 0.0.0.0:$PORT --timeout 120`
 
-| Nom | Valeur |
+## Étape 2 — Configurer les variables d'environnement
+
+Dans Render, section **Environment** :
+
+| Variable | Valeur |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | Le token de ton bot (donné par BotFather) |
-| `TELEGRAM_CHAT_ID` | L'ID de ton canal Telegram (voir ci-dessous) |
+| `TELEGRAM_BOT_TOKEN` | Ton nouveau token (après régénération) |
+| `TELEGRAM_CHAT_ID` | `-1004475850376` |
+| `TWELVE_DATA_KEY_1` à `4` | Tes 4 clés API Twelve Data |
+| `CRON_SECRET` | Une chaîne aléatoire longue de ton choix (ex: générée sur [randomkeygen.com](https://randomkeygen.com)) |
+| `PASSWORD_CANAUX_TELEGRAM` | Ton nouveau mot de passe (après changement) |
+| `CANAL_SIGNAUX_URL` | Le lien public `t.me/...` de ton canal de signaux (à créer si pas encore fait) |
 
-### Trouver ton `TELEGRAM_CHAT_ID`
+## Étape 3 — Activer le webhook Telegram
 
-1. Ajoute ton bot comme administrateur du canal `https://t.me/mrema26382`
-2. Poste n'importe quel message dans le canal
-3. Ouvre dans un navigateur : `https://api.telegram.org/bot<TON_TOKEN>/getUpdates`
-4. Cherche `"chat":{"id":-100xxxxxxxxxx` dans la réponse — ce nombre (négatif, commence souvent par `-100` pour un canal) est ton `TELEGRAM_CHAT_ID`
-
-## Étape 3 — Activer le workflow
-
-1. Onglet **Actions** du repo
-2. Si demandé, clique sur "I understand my workflows, go ahead and enable them"
-3. Sélectionne le workflow "MR EMA - Robot de Trading"
-4. Clique sur **Run workflow** pour un premier test manuel (bouton en haut à droite)
-5. Vérifie les logs : si tout est vert, le robot est opérationnel. Le message ou l'erreur apparaît dans "run-robot" → "Lancer le robot MR EMA"
-
-Une fois validé, le cron tourne automatiquement toutes les 10 minutes — plus rien à faire.
-
-## Structure du projet
+Une fois Render déployé (tu as une URL du style `https://mac-bot-xxxx.onrender.com`), ouvre dans un navigateur (remplace les valeurs) :
 
 ```
-mr-ema/
-├── .github/workflows/trading-bot.yml   ← config du cron GitHub Actions
-├── config.py            ← tous les paramètres (actifs, indicateurs, risk management)
-├── data_fetcher.py       ← récupération des données Yahoo Finance
-├── indicators.py         ← calcul EMA / MACD / ATR / TDI
-├── risk_management.py    ← calcul des pips + validation stricte du RR [1.60, 3.20]
-├── strategy.py           ← logique multi-timeframe (H1 tendance + M15 entrée)
-├── position_manager.py   ← suivi des positions ouvertes (TP/SL touchés)
-├── telegram_sender.py    ← formatage et envoi des messages Telegram
-├── chart_generator.py    ← génération des graphiques envoyés avec chaque signal
-├── main.py                ← point d'entrée, exécuté par le cron
-├── requirements.txt
-└── data/                  ← état persistant (committé automatiquement par le cron)
-    ├── positions_ouvertes.json
-    └── historique_cloture.json
+https://api.telegram.org/bot<TON_TOKEN>/setWebhook?url=https://mac-bot-xxxx.onrender.com/webhook/<TON_TOKEN>
 ```
 
-## Ce que fait le robot à chaque cycle (10 min)
+Tu dois voir `{"ok":true,"result":true,"description":"Webhook was set"}`.
 
-1. Relit les positions ouvertes depuis `data/positions_ouvertes.json`
-2. Vérifie si un TP ou le SL de chaque position a été touché → notifie sur Telegram
-3. Clôture automatiquement toute position dépassant 18h (règle day-trading stricte)
-4. Analyse les 24 actifs configurés (Forex, XAU/USD, XAG/USD, BTC/USD) avec la stratégie complète
-5. Envoie un signal (texte + graphique) pour chaque setup où EMA (H1) + MACD (M15) + TDI (M15) sont alignés ET où le ratio risque:récompense tombe dans [1.60, 3.20]
-6. À 7h Burkina Faso : message de bonjour. À 20h : bilan de la journée
-7. Sauvegarde l'état mis à jour (commit automatique dans `data/`)
+## Étape 4 — Configurer le cron externe (cron-job.org)
 
-## Modifier les actifs suivis ou les paramètres
+1. Crée un compte gratuit sur [cron-job.org](https://cron-job.org)
+2. Nouveau cronjob :
+   - URL : `https://mac-bot-xxxx.onrender.com/cron/<TON_CRON_SECRET>`
+   - Intervalle : toutes les 20 minutes
+3. Sauvegarde et active
 
-Tout se passe dans `config.py` :
-- `ASSETS` : ajouter/retirer des actifs (format ticker Yahoo Finance)
-- `MIN_RISK_REWARD` / `MAX_RISK_REWARD` : la fourchette RR autorisée (actuellement 1.60-3.20, non-négociable dans le projet initial)
-- `EMA_FAST` / `EMA_SLOW` / paramètres MACD / TDI / ATR : réglages des indicateurs
-- `MORNING_HOUR_BF` / `EVENING_HOUR_BF` : horaires des messages programmés
-- `MAX_POSITION_HOURS` : durée max avant clôture automatique (day trading)
+## Étape 5 — Enregistrer le menu de commandes (une seule fois)
 
-## Limites connues (transparence technique)
+Dans un terminal Python ou via un simple appel API, exécute une fois :
 
-- **Délai Yahoo Finance** : ~15-20 min. Le cron lui-même peut avoir 5-15 min de retard aux heures de pointe GitHub Actions.
-- **Historique limité en M15** : Yahoo Finance plafonne à ~60 jours sur cet intervalle, peu importe la période demandée dans le code.
-- **`workflow_dispatch`** permet de lancer le robot manuellement depuis l'onglet Actions pour tester sans attendre le prochain cycle cron.
+```python
+import requests
+requests.post(f"https://api.telegram.org/bot<TON_TOKEN>/setMyCommands", json={
+    "commands": [
+        {"command": "start", "description": "Démarrer / message de bienvenue"},
+        {"command": "inscrire", "description": "Créer votre compte"},
+        {"command": "connexion", "description": "Vous connecter"},
+        {"command": "signaux", "description": "Voir les positions du jour"},
+        {"command": "support", "description": "Contacter le créateur"},
+        {"command": "canaux", "description": "Canaux Telegram connectés"},
+    ]
+})
+```
+
+## Les deux stratégies (résumé technique interne)
+
+Le bot analyse 24 actifs en M15 avec deux setups indépendants, jamais nommés dans les messages envoyés aux utilisateurs :
+
+1. **Retest EMA50 + confirmation TDI** : tendance déterminée par l'écart EMA50/EMA200, entrée sur retest du prix à l'EMA50 confirmé par un rebond du RSI sur sa ligne médiane (50)
+2. **Croisement EMA50/EMA200 + rejection** : après un croisement récent des deux moyennes, entrée sur un retest de la zone avec une bougie de rejection (mèche significative)
+
+Dans les deux cas, le Take Profit vise le swing high/low le plus récent, et **aucun signal n'est envoyé si le ratio risque:récompense résultant sort de l'intervalle [1.50, 3.50]** — ce garde-fou est non-négociable et a été testé explicitement (voir les tests dans le code).
+
+## Limites connues
+
+- **Persistance SQLite sur Render gratuit** : le disque configuré (`disk` dans `render.yaml`) survit aux redémarrages normaux du service, mais un changement de plan ou une reconfiguration profonde peut le réinitialiser. Pour un usage sérieux à long terme, envisager une vraie base externe (Supabase, Railway Postgres) à terme.
+- **Limite Twelve Data** : 8 appels/minute et 800/jour par clé. Avec 24 actifs analysés toutes les 20 minutes (soit 72 cycles/jour), la consommation théorique est d'environ 1728 appels/jour, dans la limite des 3200 disponibles avec 4 clés — mais une clé qui tombe en panne réduit cette marge.
