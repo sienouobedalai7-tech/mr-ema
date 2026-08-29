@@ -1,6 +1,7 @@
 """
-MR EMA - Configuration centrale du robot
-Tous les paramètres modifiables sont ici, rien n'est en dur ailleurs dans le code.
+MAC Bot - Configuration centrale
+
+Toutes les valeurs modifiables sont ici. Rien n'est en dur ailleurs dans le code.
 """
 
 import os
@@ -9,111 +10,155 @@ import os
 # TELEGRAM
 # ============================================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")  # ID du canal/groupe, pas l'URL
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")  # canal des signaux
 
 # ============================================================
-# ACTIFS SUIVIS
+# TWELVE DATA - rotation de 4 clés API
 # ============================================================
-# Format yfinance :
-#   Forex   -> "EURUSD=X"
-#   Métaux  -> "XAUUSD=X" (or), "XAGUSD=X" (argent)
-#   Crypto  -> "BTC-USD"
-#
-# NB: XAU/USD et XAG/USD passent par le même suffixe =X que le forex sur Yahoo Finance.
+# Chaque clé gratuite : 8 appels/minute, 800 appels/jour.
+# Avec rotation sur 4 clés : jusqu'à 3200 appels/jour cumulés.
+# Le code passe à la clé suivante dès qu'une limite est atteinte (code 429),
+# jamais en fonction d'un simple compteur local, pour rester robuste même si
+# une clé a déjà été partiellement utilisée par un autre processus.
+TWELVE_DATA_API_KEYS = [
+    os.environ.get("TWELVE_DATA_KEY_1", ""),
+    os.environ.get("TWELVE_DATA_KEY_2", ""),
+    os.environ.get("TWELVE_DATA_KEY_3", ""),
+    os.environ.get("TWELVE_DATA_KEY_4", ""),
+]
+TWELVE_DATA_API_KEYS = [k for k in TWELVE_DATA_API_KEYS if k]  # retire les clés vides
 
+TWELVE_DATA_BASE_URL = "https://api.twelvedata.com/time_series"
+
+# Limite technique du plan gratuit Twelve Data (documentée : 8 req/min, 800 req/jour par clé).
+# Utilisé pour espacer les appels et éviter de déclencher des 429 évitables.
+TWELVE_DATA_MAX_CALLS_PER_MINUTE_PER_KEY = 8
+TWELVE_DATA_MIN_DELAY_BETWEEN_CALLS_SECONDS = 8  # marge de sécurité (60s / 8 ≈ 7.5s, arrondi à 8s)
+
+# ============================================================
+# ACTIFS SUIVIS (mêmes 24 que MR EMA, cohérence entre les deux projets)
+# ============================================================
+# Format Twelve Data : "EUR/USD", "XAU/USD", "BTC/USD" (avec slash, contrairement à yfinance)
 ASSETS = {
-    # --- Demandés explicitement ---
-    "XAUUSD": {"ticker": "XAUUSD=X", "type": "metal", "display": "XAU/USD (Or)"},
-    "XAGUSD": {"ticker": "XAGUSD=X", "type": "metal", "display": "XAG/USD (Argent)"},
-    "BTCUSD": {"ticker": "BTC-USD", "type": "crypto", "display": "BTC/USD"},
-    "GBPUSD": {"ticker": "GBPUSD=X", "type": "forex", "display": "GBP/USD"},
-
-    # --- 20 paires Forex parmi les plus volatiles/liquides (majeures + croisées connues pour leur volatilité) ---
-    "EURUSD": {"ticker": "EURUSD=X", "type": "forex", "display": "EUR/USD"},
-    "USDJPY": {"ticker": "USDJPY=X", "type": "forex", "display": "USD/JPY"},
-    "USDCHF": {"ticker": "USDCHF=X", "type": "forex", "display": "USD/CHF"},
-    "AUDUSD": {"ticker": "AUDUSD=X", "type": "forex", "display": "AUD/USD"},
-    "USDCAD": {"ticker": "USDCAD=X", "type": "forex", "display": "USD/CAD"},
-    "NZDUSD": {"ticker": "NZDUSD=X", "type": "forex", "display": "NZD/USD"},
-    "EURJPY": {"ticker": "EURJPY=X", "type": "forex", "display": "EUR/JPY"},
-    "GBPJPY": {"ticker": "GBPJPY=X", "type": "forex", "display": "GBP/JPY"},
-    "EURGBP": {"ticker": "EURGBP=X", "type": "forex", "display": "EUR/GBP"},
-    "AUDJPY": {"ticker": "AUDJPY=X", "type": "forex", "display": "AUD/JPY"},
-    "EURAUD": {"ticker": "EURAUD=X", "type": "forex", "display": "EUR/AUD"},
-    "GBPAUD": {"ticker": "GBPAUD=X", "type": "forex", "display": "GBP/AUD"},
-    "GBPCAD": {"ticker": "GBPCAD=X", "type": "forex", "display": "GBP/CAD"},
-    "EURCAD": {"ticker": "EURCAD=X", "type": "forex", "display": "EUR/CAD"},
-    "AUDCAD": {"ticker": "AUDCAD=X", "type": "forex", "display": "AUD/CAD"},
-    "AUDNZD": {"ticker": "AUDNZD=X", "type": "forex", "display": "AUD/NZD"},
-    "CADJPY": {"ticker": "CADJPY=X", "type": "forex", "display": "CAD/JPY"},
-    "CHFJPY": {"ticker": "CHFJPY=X", "type": "forex", "display": "CHF/JPY"},
-    "NZDJPY": {"ticker": "NZDJPY=X", "type": "forex", "display": "NZD/JPY"},
-    "EURCHF": {"ticker": "EURCHF=X", "type": "forex", "display": "EUR/CHF"},
+    "XAUUSD": {"symbol": "XAU/USD", "type": "metal", "display": "XAU/USD (Or)"},
+    "XAGUSD": {"symbol": "XAG/USD", "type": "metal", "display": "XAG/USD (Argent)"},
+    "BTCUSD": {"symbol": "BTC/USD", "type": "crypto", "display": "BTC/USD"},
+    "GBPUSD": {"symbol": "GBP/USD", "type": "forex", "display": "GBP/USD"},
+    "EURUSD": {"symbol": "EUR/USD", "type": "forex", "display": "EUR/USD"},
+    "USDJPY": {"symbol": "USD/JPY", "type": "forex", "display": "USD/JPY"},
+    "USDCHF": {"symbol": "USD/CHF", "type": "forex", "display": "USD/CHF"},
+    "AUDUSD": {"symbol": "AUD/USD", "type": "forex", "display": "AUD/USD"},
+    "USDCAD": {"symbol": "USD/CAD", "type": "forex", "display": "USD/CAD"},
+    "NZDUSD": {"symbol": "NZD/USD", "type": "forex", "display": "NZD/USD"},
+    "EURJPY": {"symbol": "EUR/JPY", "type": "forex", "display": "EUR/JPY"},
+    "GBPJPY": {"symbol": "GBP/JPY", "type": "forex", "display": "GBP/JPY"},
+    "EURGBP": {"symbol": "EUR/GBP", "type": "forex", "display": "EUR/GBP"},
+    "AUDJPY": {"symbol": "AUD/JPY", "type": "forex", "display": "AUD/JPY"},
+    "EURAUD": {"symbol": "EUR/AUD", "type": "forex", "display": "EUR/AUD"},
+    "GBPAUD": {"symbol": "GBP/AUD", "type": "forex", "display": "GBP/AUD"},
+    "GBPCAD": {"symbol": "GBP/CAD", "type": "forex", "display": "GBP/CAD"},
+    "EURCAD": {"symbol": "EUR/CAD", "type": "forex", "display": "EUR/CAD"},
+    "AUDCAD": {"symbol": "AUD/CAD", "type": "forex", "display": "AUD/CAD"},
+    "AUDNZD": {"symbol": "AUD/NZD", "type": "forex", "display": "AUD/NZD"},
+    "CADJPY": {"symbol": "CAD/JPY", "type": "forex", "display": "CAD/JPY"},
+    "CHFJPY": {"symbol": "CHF/JPY", "type": "forex", "display": "CHF/JPY"},
+    "NZDJPY": {"symbol": "NZD/JPY", "type": "forex", "display": "NZD/JPY"},
+    "EURCHF": {"symbol": "EUR/CHF", "type": "forex", "display": "EUR/CHF"},
 }
 
 # ============================================================
-# TIMEFRAMES (Multi-Timeframe Analysis)
+# TIMEFRAME - un seul, contrainte du plan gratuit Twelve Data
 # ============================================================
-# H1 = filtre de tendance (EMA50/200 stables)
-# M15 = timing d'entrée (MACD + TDI)
-# Yahoo Finance limite le nombre de bougies réellement disponible selon l'intervalle,
-# donc on demande 1000 mais le code s'adapte si Yahoo en renvoie moins (voir data_fetcher.py).
-TIMEFRAME_TREND = {"interval": "1h", "period": "60d", "candles_target": 1000}
-TIMEFRAME_ENTRY = {"interval": "15m", "period": "60d", "candles_target": 1000}
-
-# Nombre minimum de bougies pour qu'un calcul d'indicateur soit jugé fiable.
-# En dessous de ce seuil sur un actif donné, l'actif est ignoré ce cycle (pas de faux signal
-# basé sur un EMA200 mal formé).
-MIN_CANDLES_TREND = 210   # marge au-dessus de 200 pour un EMA200 stable
-MIN_CANDLES_ENTRY = 50
+TIMEFRAME = "15min"
+CANDLES_REQUESTED = 1000
+MIN_CANDLES_REQUIRED = 210  # marge au-dessus de EMA200 pour un calcul fiable
 
 # ============================================================
-# PARAMÈTRES DES INDICATEURS
+# INDICATEURS
 # ============================================================
 EMA_FAST = 50
 EMA_SLOW = 200
 
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-
-ATR_PERIOD = 14
-
-# TDI (Traders Dynamic Index) - paramètres standards
 TDI_RSI_PERIOD = 13
-TDI_RSI_PRICE_LINE = 2       # lissage de la ligne RSI (ligne verte)
-TDI_TRADE_SIGNAL_LINE = 7    # ligne de signal (ligne rouge)
-TDI_VOLATILITY_BAND = 34     # bandes de Bollinger sur le RSI
+TDI_RSI_PRICE_LINE = 2
+TDI_TRADE_SIGNAL_LINE = 7
+TDI_VOLATILITY_BAND = 34
+
+ATR_PERIOD = 14  # utilisé uniquement pour la marge derrière une mèche de rejection
 
 # ============================================================
-# RISK MANAGEMENT (règle non-négociable du projet)
+# STRATÉGIE 1 - Retest EMA50 + confirmation TDI
 # ============================================================
-# Ratio Risque:Récompense autorisé - AUCUN signal en dehors de cet intervalle n'est envoyé.
-MIN_RISK_REWARD = 1.60
-MAX_RISK_REWARD = 3.20
+# Écart minimum entre EMA50 et EMA200 pour juger la tendance "assez nette" (évite de trader
+# un marché plat où les deux EMA sont collées, source de faux signaux).
+STRAT1_ECART_MIN_TENDANCE = 0.0006  # 0.06%, un peu plus large qu'en H1 vu qu'on est en M15
 
-# Multiplicateurs ATR pour construire SL / TP (ajustés puis validés contre le RR autorisé)
-ATR_SL_MULTIPLIER = 1.5      # Stop Loss = distance en ATR par rapport à l'entrée
-ATR_TP1_MULTIPLIER = 2.4     # TP1 ≈ RR 1.60 (2.4/1.5)
-ATR_TP2_MULTIPLIER = 3.6     # TP2 ≈ RR 2.40 (3.6/1.5)
-ATR_TP3_MULTIPLIER = 4.8     # TP3 ≈ RR 3.20 (4.8/1.5) - plafond autorisé
+# Le prix est considéré "au contact" de l'EMA50 si l'écart est inférieur à ce pourcentage
+STRAT1_TOLERANCE_CONTACT_EMA50 = 0.0012  # 0.12%
+
+# Le RSI est considéré "proche de 50" (pour le rebond) dans cette bande
+STRAT1_ZONE_RSI_REBOND = 6  # RSI entre 44 et 56 = zone de rebond valide sur la ligne 50
 
 # ============================================================
-# HORAIRES (fuseau Burkina Faso = UTC+0, pas de changement d'heure d'été)
+# STRATÉGIE 2 - Croisement EMA50/EMA200 + rejection
 # ============================================================
-TIMEZONE_BF = "Africa/Ouagadougou"  # UTC+0 toute l'année
+# Nombre de bougies en arrière dans lesquelles on cherche un croisement récent
+STRAT2_FENETRE_CROISEMENT = 30
+
+# Après le croisement, nombre de bougies pendant lesquelles on autorise un retest+rejection
+STRAT2_FENETRE_RETEST = 15
+
+# Une mèche est jugée significative (donc "rejection") si elle représente au moins ce
+# pourcentage du corps de la bougie - évite de valider un signal sur une mèche minuscule
+STRAT2_RATIO_MECHE_MIN = 0.5
+
+# ============================================================
+# RISK MANAGEMENT (règle non-négociable, commune aux deux stratégies)
+# ============================================================
+MIN_RISK_REWARD = 1.50
+MAX_RISK_REWARD = 3.50
+
+# Marge ajoutée derrière une mèche pour le SL (en multiple d'ATR, pour que la marge
+# s'adapte à la volatilité de l'actif plutôt que d'être une valeur fixe en pips)
+MARGE_DERRIERE_MECHE_ATR = 0.15
+
+# Fenêtre de recherche du swing high/low le plus récent pour le TP
+FENETRE_SWING_TP = 40
+
+# ============================================================
+# HORAIRES (Burkina Faso = UTC+0 toute l'année)
+# ============================================================
+TIMEZONE_BF = "Africa/Ouagadougou"
 MORNING_HOUR_BF = 7
 EVENING_HOUR_BF = 20
 
 # ============================================================
-# FICHIERS D'ÉTAT (persistance entre les runs cron)
+# CRON EXTERNE (cron-job.org appelle cet endpoint toutes les 20 min)
 # ============================================================
-STATE_FILE = "data/positions_ouvertes.json"
-HISTORY_FILE = "data/historique_cloture.json"
+CRON_SECRET = os.environ.get("CRON_SECRET", "")  # protège l'endpoint contre des appels non désirés
 
 # ============================================================
-# DAY TRADING - Durée de vie maximale d'une position
+# BASE DE DONNÉES
 # ============================================================
-# Le robot fait du day trading : une position ne doit jamais rester ouverte
-# au-delà de cette durée. Si dépassée, elle est clôturée automatiquement au marché.
-MAX_POSITION_HOURS = 18  # ouverte le matin, fermée avant le lendemain matin max
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "data/macbot.db")
+
+# ============================================================
+# ACCÈS "CANAUX TELEGRAM" (fonctionnalité protégée par mot de passe)
+# ============================================================
+PASSWORD_CANAUX_TELEGRAM = os.environ.get("PASSWORD_CANAUX_TELEGRAM", "")
+
+# ============================================================
+# SUPPORT
+# ============================================================
+SUPPORT_TELEGRAM_URL = "https://t.me/Sienouobedalai226"
+
+# ============================================================
+# CANAL OFFICIEL DES SIGNAUX (affiché dans la commande /canaux)
+# À renseigner : lien public du canal où le chat_id -1004475850376 pointe.
+# ============================================================
+CANAL_SIGNAUX_URL = os.environ.get("CANAL_SIGNAUX_URL", "")
+
+# ============================================================
+# DAY TRADING - durée de vie max d'une position (cohérence avec MR EMA)
+# ============================================================
+MAX_POSITION_HOURS = 18

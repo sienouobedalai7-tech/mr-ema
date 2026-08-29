@@ -1,16 +1,24 @@
 """
-MR EMA - Logique de stratégie multi-timeframe
+MAC Bot - Logique des 2 stratégies BTMM
 
-Architecture :
-  1. TENDANCE (H1)  : EMA50 vs EMA200 -> détermine le biais directionnel autorisé
-  2. MOMENTUM (M15) : MACD -> confirme que l'élan va dans le sens de la tendance H1
-  3. TIMING (M15)   : TDI -> détermine le point d'entrée précis (croisement price/signal line)
-  4. RISQUE (M15)   : ATR -> calibre SL/TP, puis risk_management valide le ratio RR
+STRATÉGIE 1 - Retest EMA50 + confirmation TDI :
+  1. Tendance déterminée par EMA50 vs EMA200 (écart suffisant pour éviter le range)
+  2. Le prix revient tester l'EMA50 (contact, pas forcément un croisement exact)
+  3. Confirmation : le RSI (composante du TDI) rebondit sur sa ligne médiane (50)
+     au même moment que le test du prix sur l'EMA50
+  4. TP = prochain swing high/low, SL = sous/sur l'EMA50 (ou derrière la mèche si
+     elle dépasse déjà l'EMA50 au moment du test)
 
-Un signal n'est retourné QUE si les 4 conditions sont simultanément remplies.
-Ce n'est pas une garantie de gain (aucune stratégie technique n'en est une) : c'est
-un filtre qui rejette la majorité des cas pour ne garder que les setups où tendance,
-momentum et timing sont alignés.
+STRATÉGIE 2 - Croisement EMA50/EMA200 + rejection :
+  1. Un croisement EMA50/EMA200 doit s'être produit récemment
+  2. Après le croisement, le prix revient tester la zone du croisement
+  3. Confirmation : une bougie de rejection (mèche significative dans la zone,
+     clôture qui ressort de l'autre côté)
+  4. TP = prochain swing high/low, SL = derrière la mèche de rejection
+
+Les deux stratégies sont indépendantes et évaluées en parallèle sur chaque actif.
+Le TDI n'intervient PAS dans la stratégie 2 (confirmé explicitement par le
+demandeur du projet).
 """
 
 from dataclasses import dataclass
@@ -24,219 +32,242 @@ import risk_management
 
 @dataclass
 class SignalTrade:
+    strategie: str  # "retest_ema50" ou "croisement_rejection" - jamais montré à l'utilisateur final
     direction: str
     niveaux: risk_management.NiveauxPosition
-    prix_analyse: float
-    contexte_marche: str
-    raison_ema: str
-    raison_macd: str
-    raison_tdi: str
-    atr_valeur: float
 
 
-def _detecter_tendance_ema(df_trend_avec_indicateurs: pd.DataFrame) -> Optional[str]:
-    """
-    Détermine le biais de tendance sur H1 via EMA50/EMA200.
-    Retourne "ACHAT", "VENTE", ou None si pas de tendance claire (EMA trop proches = range).
-    """
-    derniere = df_trend_avec_indicateurs.iloc[-1]
-    ema_fast = derniere["ema_fast"]
-    ema_slow = derniere["ema_slow"]
-
+def _detecter_tendance(df_ind: pd.DataFrame) -> Optional[str]:
+    """Tendance via écart EMA50/EMA200. None si l'écart est trop faible (marché plat)."""
+    derniere = df_ind.iloc[-1]
+    ema_fast, ema_slow = derniere["ema_fast"], derniere["ema_slow"]
     if pd.isna(ema_fast) or pd.isna(ema_slow):
         return None
-
-    # Écart minimum entre les deux EMA pour éviter de trader un marché plat où elles
-    # se croisent sans cesse (faux signaux typiques des marchés en range)
     ecart_relatif = abs(ema_fast - ema_slow) / ema_slow
-
-    if ecart_relatif < 0.0003:  # écart < 0.03% = tendance trop faible pour être exploitée
+    if ecart_relatif < config.STRAT1_ECART_MIN_TENDANCE:
         return None
-
-    if ema_fast > ema_slow:
-        return "ACHAT"
-    return "VENTE"
+    return "ACHAT" if ema_fast > ema_slow else "VENTE"
 
 
-def _confirmer_momentum_macd(df_entry_avec_indicateurs: pd.DataFrame, direction_attendue: str,
-                              fenetre_detection: int = 5) -> bool:
+def _prix_au_contact_ema50(df_ind: pd.DataFrame, index: int) -> bool:
+    """Le prix (High/Low de la bougie) touche-t-il l'EMA50 à cet index ?"""
+    row = df_ind.iloc[index]
+    if pd.isna(row["ema_fast"]):
+        return False
+    ema50 = row["ema_fast"]
+    # Contact = l'EMA50 se situe entre le Low et le High de la bougie (avec tolérance),
+    # ou très proche du Close, pour couvrir les cas où le retest est net ou approximatif.
+    dans_la_bougie = row["Low"] <= ema50 <= row["High"]
+    proche_du_close = abs(row["Close"] - ema50) / ema50 < config.STRAT1_TOLERANCE_CONTACT_EMA50
+    return dans_la_bougie or proche_du_close
+
+
+def _rsi_rebondit_sur_50(df_ind: pd.DataFrame, index: int, direction: str) -> bool:
     """
-    Vérifie que le MACD (M15) confirme la direction donnée par la tendance H1.
-    Confirmation = croisement macd_line/signal_line dans le bon sens sur l'une des
-    `fenetre_detection` dernières bougies, OU histogramme actuel déjà positif/négatif
-    et croissant dans ce sens (élan déjà en cours, pas besoin d'un croisement récent).
+    Le RSI rebondit-il sur sa ligne médiane (50) à cet index, dans le sens attendu ?
+
+    Point de vigilance (leçon tirée d'un bug similaire sur un autre projet) : la
+    condition est vérifiée AU MOMENT PRÉCIS du contact prix/EMA50 (paramètre `index`),
+    pas sur une fenêtre glissante des dernières bougies dans l'absolu. Si on regardait
+    uniquement "les 3 dernières bougies" sans ancrer au point de contact, un rebond
+    rapide pourrait être raté parce que le RSI a déjà continué sa route au moment où
+    le code regarde.
     """
-    donnees = df_entry_avec_indicateurs.tail(fenetre_detection + 1)
-    if donnees["macd_line"].isna().any() or donnees["macd_signal"].isna().any() or len(donnees) < 2:
+    if index < 1:
+        return False
+    rsi_actuel = df_ind["tdi_rsi"].iloc[index]
+    rsi_precedent = df_ind["tdi_rsi"].iloc[index - 1]
+    if pd.isna(rsi_actuel) or pd.isna(rsi_precedent):
         return False
 
-    derniere = donnees.iloc[-1]
-    precedente = donnees.iloc[-2]
+    zone_basse = 50 - config.STRAT1_ZONE_RSI_REBOND
+    zone_haute = 50 + config.STRAT1_ZONE_RSI_REBOND
+    dans_la_zone = zone_basse <= rsi_actuel <= zone_haute
 
-    histogramme_croissant_positif = derniere["macd_histogram"] > 0 and \
-                                     derniere["macd_histogram"] > precedente["macd_histogram"]
-    histogramme_decroissant_negatif = derniere["macd_histogram"] < 0 and \
-                                       derniere["macd_histogram"] < precedente["macd_histogram"]
-
-    if direction_attendue == "ACHAT" and histogramme_croissant_positif:
-        return True
-    if direction_attendue == "VENTE" and histogramme_decroissant_negatif:
-        return True
-
-    macd_line = donnees["macd_line"]
-    signal_line = donnees["macd_signal"]
-
-    for i in range(len(donnees) - 1, 0, -1):
-        croisement_haussier = (macd_line.iloc[i - 1] <= signal_line.iloc[i - 1]) and \
-                               (macd_line.iloc[i] > signal_line.iloc[i])
-        croisement_baissier = (macd_line.iloc[i - 1] >= signal_line.iloc[i - 1]) and \
-                               (macd_line.iloc[i] < signal_line.iloc[i])
-
-        if direction_attendue == "ACHAT" and croisement_haussier:
-            return True
-        if direction_attendue == "VENTE" and croisement_baissier:
-            return True
-
-    return False
-
-
-def _confirmer_timing_tdi(df_entry_avec_indicateurs: pd.DataFrame, direction_attendue: str,
-                           fenetre_detection: int = 5, fenetre_survente_avant: int = 8) -> bool:
-    """
-    Vérifie le TDI (M15) pour le timing d'entrée précis.
-    Signal ACHAT : la ligne verte (price_line) croise au-dessus de la ligne rouge (signal_line)
-                   ET le RSI était en zone de survente PEU AVANT ce croisement précis
-    Signal VENTE : croisement inverse, RSI en surachat peu avant
-
-    Le croisement est cherché sur les `fenetre_detection` dernières bougies (pas uniquement
-    la toute dernière) pour ne pas rater un signal d'un cycle cron à l'autre. La condition de
-    survente/surachat est vérifiée sur une fenêtre qui se termine AU MOMENT du croisement
-    détecté (pas sur les dernières bougies dans l'absolu) : un rebond peut être si rapide que
-    le RSI n'est déjà plus en survente 2-3 bougies plus tard, alors qu'il l'était juste avant
-    le croisement lui-même. C'est cette relation temporelle précise qui doit être vérifiée.
-    """
-    cols_requises = ["tdi_price_line", "tdi_signal_line", "tdi_rsi"]
-    donnees = df_entry_avec_indicateurs.tail(fenetre_detection + fenetre_survente_avant)
-    if donnees[cols_requises].isna().any().any() or len(donnees) < 2:
+    if not dans_la_zone:
         return False
 
-    price_line = donnees["tdi_price_line"]
-    signal_line = donnees["tdi_signal_line"]
-    rsi = donnees["tdi_rsi"]
-
-    # On cherche un croisement sur chacune des `fenetre_detection` dernières bougies,
-    # en partant de la plus récente vers la plus ancienne (on garde le plus récent trouvé).
-    for i in range(len(donnees) - 1, len(donnees) - 1 - fenetre_detection, -1):
-        if i < 1:
-            break
-
-        croisement_haussier = (price_line.iloc[i - 1] <= signal_line.iloc[i - 1]) and \
-                               (price_line.iloc[i] > signal_line.iloc[i])
-        croisement_baissier = (price_line.iloc[i - 1] >= signal_line.iloc[i - 1]) and \
-                               (price_line.iloc[i] < signal_line.iloc[i])
-
-        # Fenêtre de survente/surachat évaluée JUSTE AVANT le point de croisement trouvé,
-        # pas sur les dernières bougies dans l'absolu.
-        debut_fenetre = max(0, i - fenetre_survente_avant)
-        rsi_avant_croisement = rsi.iloc[debut_fenetre:i + 1]
-
-        if direction_attendue == "ACHAT" and croisement_haussier:
-            if (rsi_avant_croisement < 35).any():
-                return True
-        elif direction_attendue == "VENTE" and croisement_baissier:
-            if (rsi_avant_croisement > 65).any():
-                return True
-
-    return False
+    if direction == "ACHAT":
+        return rsi_actuel >= rsi_precedent  # le RSI remonte au contact du 50
+    else:  # VENTE
+        return rsi_actuel <= rsi_precedent  # le RSI redescend au contact du 50
 
 
-def _detecter_contexte_marche(df_entry_avec_indicateurs: pd.DataFrame) -> str:
+def _construire_sl_avec_meche(df_ind: pd.DataFrame, index: int, direction: str, niveau_reference: float) -> float:
     """
-    Détermine si le marché est "normal", "volatil", ou en "range", via l'ATR récent
-    comparé à sa propre moyenne. Sert à décider si TP2/TP3 sont pertinents.
+    Construit le SL en tenant compte d'une éventuelle mèche qui dépasse déjà le
+    niveau de référence (EMA50 pour la stratégie 1, zone de croisement pour la 2).
+    Si une mèche dépasse, le SL se place derrière elle avec une marge en ATR ;
+    sinon, le SL se place juste derrière le niveau de référence lui-même.
     """
-    atr_recent = df_entry_avec_indicateurs["atr"].tail(20)
-    if atr_recent.isna().all():
-        return "normal"
+    row = df_ind.iloc[index]
+    atr = row["atr"] if not pd.isna(row["atr"]) else 0
+    marge = atr * config.MARGE_DERRIERE_MECHE_ATR
 
-    atr_actuel = atr_recent.iloc[-1]
-    atr_moyen = atr_recent.mean()
-
-    if pd.isna(atr_actuel) or pd.isna(atr_moyen) or atr_moyen == 0:
-        return "normal"
-
-    ratio = atr_actuel / atr_moyen
-
-    if ratio > 1.3:
-        return "volatil"
-    if ratio < 0.7:
-        return "range"
-    return "normal"
+    if direction == "ACHAT":
+        meche_depasse = row["Low"] < niveau_reference
+        if meche_depasse:
+            return row["Low"] - marge
+        return niveau_reference - marge
+    else:  # VENTE
+        meche_depasse = row["High"] > niveau_reference
+        if meche_depasse:
+            return row["High"] + marge
+        return niveau_reference + marge
 
 
-def analyser_actif(ticker_symbol: str, asset_type: str, df_trend: pd.DataFrame,
-                    df_entry: pd.DataFrame) -> Optional[SignalTrade]:
-    """
-    Point d'entrée principal : applique la stratégie complète multi-timeframe sur un actif.
-    Retourne un SignalTrade UNIQUEMENT si les 4 conditions (EMA, MACD, TDI, RR valide) sont réunies.
-    """
-    df_trend_ind = indicators.calculer_tous_indicateurs(
-        df_trend, config.EMA_FAST, config.EMA_SLOW,
-        config.MACD_FAST, config.MACD_SLOW, config.MACD_SIGNAL,
-        config.ATR_PERIOD, config.TDI_RSI_PERIOD, config.TDI_RSI_PRICE_LINE,
-        config.TDI_TRADE_SIGNAL_LINE, config.TDI_VOLATILITY_BAND,
-    )
-    df_entry_ind = indicators.calculer_tous_indicateurs(
-        df_entry, config.EMA_FAST, config.EMA_SLOW,
-        config.MACD_FAST, config.MACD_SLOW, config.MACD_SIGNAL,
-        config.ATR_PERIOD, config.TDI_RSI_PERIOD, config.TDI_RSI_PRICE_LINE,
-        config.TDI_TRADE_SIGNAL_LINE, config.TDI_VOLATILITY_BAND,
-    )
-
-    # --- 1. TENDANCE (H1) ---
-    direction = _detecter_tendance_ema(df_trend_ind)
+def _evaluer_strategie1(symbol: str, asset_type: str, df_ind: pd.DataFrame) -> Optional[SignalTrade]:
+    """Stratégie 1 : retest EMA50 + confirmation TDI. Vérifiée sur la dernière bougie close."""
+    direction = _detecter_tendance(df_ind)
     if direction is None:
-        return None  # pas de tendance claire -> on ne trade pas ce marché en range sur H1
-
-    # --- 2. MOMENTUM (M15) ---
-    if not _confirmer_momentum_macd(df_entry_ind, direction):
         return None
 
-    # --- 3. TIMING (M15) ---
-    if not _confirmer_timing_tdi(df_entry_ind, direction):
+    index_actuel = len(df_ind) - 1
+
+    if not _prix_au_contact_ema50(df_ind, index_actuel):
+        return None
+    if not _rsi_rebondit_sur_50(df_ind, index_actuel, direction):
         return None
 
-    # --- 4. RISQUE : construction des niveaux + validation stricte du RR ---
-    derniere_entry = df_entry_ind.iloc[-1]
-    prix_actuel = float(derniere_entry["Close"])
-    atr_valeur = float(derniere_entry["atr"])
+    prix_entree = float(df_ind["Close"].iloc[index_actuel])
+    ema50 = float(df_ind["ema_fast"].iloc[index_actuel])
+    stop_loss = _construire_sl_avec_meche(df_ind, index_actuel, direction, ema50)
 
-    if pd.isna(atr_valeur) or atr_valeur <= 0:
+    if direction == "ACHAT":
+        take_profit = risk_management.trouver_swing_high(df_ind, config.FENETRE_SWING_TP, exclure_derniere_n=1)
+    else:
+        take_profit = risk_management.trouver_swing_low(df_ind, config.FENETRE_SWING_TP, exclure_derniere_n=1)
+
+    if take_profit is None:
         return None
 
-    contexte = _detecter_contexte_marche(df_entry_ind)
-
-    niveaux = risk_management.construire_niveaux(
-        direction=direction,
-        prix_entree=prix_actuel,
-        atr=atr_valeur,
-        asset_type=asset_type,
-        ticker_symbol=ticker_symbol,
-        contexte_marche=contexte,
-    )
-
+    niveaux = risk_management.construire_niveaux(direction, prix_entree, stop_loss, take_profit, asset_type, symbol)
     if niveaux is None:
-        # Le RR du TP1 ne respecte pas l'intervalle [1.60, 3.20] -> AUCUN signal envoyé,
-        # même si EMA/MACD/TDI étaient tous alignés. Le risk management est non-négociable.
         return None
 
-    return SignalTrade(
-        direction=direction,
-        niveaux=niveaux,
-        prix_analyse=prix_actuel,
-        contexte_marche=contexte,
-        raison_ema=f"EMA{config.EMA_FAST}/{config.EMA_SLOW} alignées {direction} sur H1",
-        raison_macd="MACD confirme le momentum sur M15",
-        raison_tdi="TDI confirme le timing d'entrée sur M15",
-        atr_valeur=atr_valeur,
+    return SignalTrade(strategie="retest_ema50", direction=direction, niveaux=niveaux)
+
+
+def _trouver_croisement_recent(df_ind: pd.DataFrame, fenetre: int) -> Optional[tuple]:
+    """
+    Cherche un croisement EMA50/EMA200 dans les `fenetre` dernières bougies.
+    Retourne (index_du_croisement, direction) ou None si aucun croisement trouvé.
+    direction = "ACHAT" si EMA50 passe AU-DESSUS de EMA200 (croisement haussier),
+                "VENTE" si EMA50 passe EN-DESSOUS de EMA200 (croisement baissier).
+    """
+    if len(df_ind) < fenetre + 1:
+        return None
+
+    zone = df_ind.iloc[-(fenetre + 1):]
+    ema_fast = zone["ema_fast"]
+    ema_slow = zone["ema_slow"]
+
+    if ema_fast.isna().any() or ema_slow.isna().any():
+        return None
+
+    # On parcourt de la bougie la plus récente vers la plus ancienne pour trouver
+    # le croisement le plus récent en premier.
+    for i in range(len(zone) - 1, 0, -1):
+        etait_en_dessous = ema_fast.iloc[i - 1] <= ema_slow.iloc[i - 1]
+        est_au_dessus = ema_fast.iloc[i] > ema_slow.iloc[i]
+        if etait_en_dessous and est_au_dessus:
+            index_reel = len(df_ind) - (fenetre + 1) + i
+            return (index_reel, "ACHAT")
+
+        etait_au_dessus = ema_fast.iloc[i - 1] >= ema_slow.iloc[i - 1]
+        est_en_dessous = ema_fast.iloc[i] < ema_slow.iloc[i]
+        if etait_au_dessus and est_en_dessous:
+            index_reel = len(df_ind) - (fenetre + 1) + i
+            return (index_reel, "VENTE")
+
+    return None
+
+
+def _detecter_rejection(df_ind: pd.DataFrame, index: int, direction: str, niveau_zone: float) -> bool:
+    """
+    Une rejection = une bougie dont la mèche dépasse la zone testée, mais dont le
+    corps (open/close) ne dépasse pas franchement de l'autre côté, avec une mèche
+    jugée significative par rapport à la taille du corps (évite de valider sur une
+    mèche insignifiante, du simple bruit de marché).
+    """
+    row = df_ind.iloc[index]
+    corps = abs(row["Close"] - row["Open"])
+    if corps == 0:
+        corps = (row["High"] - row["Low"]) * 0.01  # évite une division par zéro sur un doji
+
+    if direction == "VENTE":
+        # Après un croisement baissier, on attend un retest par le haut avec rejection :
+        # la mèche haute dépasse la zone, mais la clôture reste en dessous.
+        meche_haute = row["High"] - max(row["Open"], row["Close"])
+        touche_la_zone = row["High"] >= niveau_zone
+        cloture_sous_la_zone = row["Close"] < niveau_zone
+        meche_significative = meche_haute >= corps * config.STRAT2_RATIO_MECHE_MIN
+        return touche_la_zone and cloture_sous_la_zone and meche_significative
+
+    else:  # ACHAT
+        meche_basse = min(row["Open"], row["Close"]) - row["Low"]
+        touche_la_zone = row["Low"] <= niveau_zone
+        cloture_au_dessus_de_la_zone = row["Close"] > niveau_zone
+        meche_significative = meche_basse >= corps * config.STRAT2_RATIO_MECHE_MIN
+        return touche_la_zone and cloture_au_dessus_de_la_zone and meche_significative
+
+
+def _evaluer_strategie2(symbol: str, asset_type: str, df_ind: pd.DataFrame) -> Optional[SignalTrade]:
+    """Stratégie 2 : croisement EMA50/EMA200 puis retest avec rejection."""
+    croisement = _trouver_croisement_recent(df_ind, config.STRAT2_FENETRE_CROISEMENT)
+    if croisement is None:
+        return None
+
+    index_croisement, direction_croisement = croisement
+    index_actuel = len(df_ind) - 1
+
+    # Le retest doit se produire dans une fenêtre raisonnable après le croisement,
+    # ni immédiatement (pas encore de vrai retest) ni trop tard (le setup est expiré).
+    bougies_depuis_croisement = index_actuel - index_croisement
+    if bougies_depuis_croisement < 1 or bougies_depuis_croisement > config.STRAT2_FENETRE_RETEST:
+        return None
+
+    niveau_zone = float(df_ind["ema_fast"].iloc[index_actuel])  # la zone de croisement suit l'EMA50 actuelle
+
+    if not _detecter_rejection(df_ind, index_actuel, direction_croisement, niveau_zone):
+        return None
+
+    prix_entree = float(df_ind["Close"].iloc[index_actuel])
+    stop_loss = _construire_sl_avec_meche(df_ind, index_actuel, direction_croisement, niveau_zone)
+
+    if direction_croisement == "ACHAT":
+        take_profit = risk_management.trouver_swing_high(df_ind, config.FENETRE_SWING_TP, exclure_derniere_n=1)
+    else:
+        take_profit = risk_management.trouver_swing_low(df_ind, config.FENETRE_SWING_TP, exclure_derniere_n=1)
+
+    if take_profit is None:
+        return None
+
+    niveaux = risk_management.construire_niveaux(direction_croisement, prix_entree, stop_loss, take_profit, asset_type, symbol)
+    if niveaux is None:
+        return None
+
+    return SignalTrade(strategie="croisement_rejection", direction=direction_croisement, niveaux=niveaux)
+
+
+def analyser_actif(symbol: str, asset_type: str, df: pd.DataFrame) -> Optional[SignalTrade]:
+    """
+    Point d'entrée principal : évalue les 2 stratégies sur un actif.
+    Si les deux se valident au même cycle, la stratégie 1 (retest EMA50+TDI) est
+    prioritaire, car elle a une confirmation multi-facteurs (prix + RSI) plus stricte
+    que la stratégie 2 (mèche seule).
+    """
+    df_ind = indicators.calculer_tous_indicateurs(
+        df, config.EMA_FAST, config.EMA_SLOW, config.ATR_PERIOD,
+        config.TDI_RSI_PERIOD, config.TDI_RSI_PRICE_LINE, config.TDI_TRADE_SIGNAL_LINE, config.TDI_VOLATILITY_BAND,
     )
+
+    signal1 = _evaluer_strategie1(symbol, asset_type, df_ind)
+    if signal1 is not None:
+        return signal1
+
+    signal2 = _evaluer_strategie2(symbol, asset_type, df_ind)
+    if signal2 is not None:
+        return signal2
+
+    return None
